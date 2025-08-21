@@ -18,6 +18,8 @@ services:
       context: .
       dockerfile: client/Dockerfile
     image: pingpong-client:latest
+    stdin_open: true  
+    tty: true         
     environment:
       SERVER_ADDR: "server:9000"
       PING_INTERVAL_MS: "1000"
