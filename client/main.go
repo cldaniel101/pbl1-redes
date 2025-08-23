@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,13 +30,26 @@ func handleConn(conn net.Conn) {
 	peer := conn.RemoteAddr().String()
 	log.Printf("[CLIENT] connected to %s", peer)
 
+	// Goroutine para receber mensagens do servidor
 	go func() {
 		r := bufio.NewScanner(conn)
 		for r.Scan() {
 			line := strings.TrimSpace(r.Text())
 			log.Printf("[CLIENT] <- %q", line)
+
 			if strings.HasPrefix(line, "MSG ") {
 				fmt.Printf("Received: %s\n", strings.TrimPrefix(line, "MSG "))
+			} else if strings.HasPrefix(line, "PONG ") {
+				// Processar resposta PONG e calcular RTT
+				timestampStr := strings.TrimPrefix(line, "PONG ")
+				if sentTime, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
+					currentTime := time.Now().UnixMilli()
+					rtt := currentTime - sentTime
+					fmt.Printf("RTT: %d ms\n", rtt)
+					log.Printf("[CLIENT] RTT calculated: %d ms", rtt)
+				} else {
+					log.Printf("[CLIENT] error parsing PONG timestamp: %v", err)
+				}
 			}
 		}
 		if err := r.Err(); err != nil {
@@ -44,7 +58,22 @@ func handleConn(conn net.Conn) {
 		log.Printf("[CLIENT] server closed connection")
 	}()
 
+	// Entrar na sala automaticamente
 	fmt.Fprintln(conn, "CMD JOIN room-1")
+
+	// Goroutine para enviar PINGs periódicos
+	pingInterval := getPingInterval()
+	go func() {
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			timestamp := time.Now().UnixMilli()
+			pingMsg := fmt.Sprintf("PING %d", timestamp)
+			fmt.Fprintln(conn, pingMsg)
+			log.Printf("[CLIENT] -> %q", pingMsg)
+		}
+	}()
 
 	// Goroutine para ler a entrada do usuário e enviar mensagens
 	go func() {
@@ -57,7 +86,7 @@ func handleConn(conn net.Conn) {
 		}
 	}()
 
-	// Aguarda indefinidamente, pois não há mais envio periódico
+	// Aguarda indefinidamente
 	select {}
 }
 
@@ -66,4 +95,12 @@ func getEnv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func getPingInterval() time.Duration {
+	intervalStr := getEnv("PING_INTERVAL_MS", "2000")
+	if intervalMs, err := strconv.Atoi(intervalStr); err == nil {
+		return time.Duration(intervalMs) * time.Millisecond
+	}
+	return 2 * time.Second // fallback padrão
 }
