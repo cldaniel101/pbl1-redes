@@ -58,8 +58,8 @@ func handleConn(conn net.Conn) {
 		log.Printf("[CLIENT] server closed connection")
 	}()
 
-	// Entrar na sala automaticamente
-	fmt.Fprintln(conn, "CMD JOIN room-1")
+	// Envia o comando para entrar na fila de matchmaking
+	fmt.Fprintln(conn, "CMD FIND_MATCH")
 
 	// Goroutine para enviar PINGs periódicos
 	pingInterval := getPingInterval()
