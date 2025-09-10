@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,6 +26,11 @@ func main() {
 	}
 }
 
+var (
+	showPing  bool
+	pingMutex sync.RWMutex
+)
+
 func handleConn(conn net.Conn) {
 	defer conn.Close()
 	peer := conn.RemoteAddr().String()
@@ -35,7 +41,6 @@ func handleConn(conn net.Conn) {
 		r := bufio.NewScanner(conn)
 		for r.Scan() {
 			line := strings.TrimSpace(r.Text())
-			log.Printf("[CLIENT] <- %q", line)
 
 			if strings.HasPrefix(line, "MSG ") {
 				fmt.Printf("Received: %s\n", strings.TrimPrefix(line, "MSG "))
@@ -45,11 +50,18 @@ func handleConn(conn net.Conn) {
 				if sentTime, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
 					currentTime := time.Now().UnixMilli()
 					rtt := currentTime - sentTime
-					fmt.Printf("RTT: %d ms\n", rtt)
-					log.Printf("[CLIENT] RTT calculated: %d ms", rtt)
+
+					// Mostrar RTT apenas se o usuário habilitou via comando /ping
+					pingMutex.RLock()
+					if showPing {
+						fmt.Printf("RTT: %d ms\n", rtt)
+					}
+					pingMutex.RUnlock()
 				} else {
 					log.Printf("[CLIENT] error parsing PONG timestamp: %v", err)
 				}
+			} else if strings.HasPrefix(line, "ACK ") {
+				fmt.Printf("Server: %s\n", strings.TrimPrefix(line, "ACK "))
 			}
 		}
 		if err := r.Err(); err != nil {
@@ -71,16 +83,26 @@ func handleConn(conn net.Conn) {
 			timestamp := time.Now().UnixMilli()
 			pingMsg := fmt.Sprintf("PING %d", timestamp)
 			fmt.Fprintln(conn, pingMsg)
-			log.Printf("[CLIENT] -> %q", pingMsg)
 		}
 	}()
 
-	// Goroutine para ler a entrada do usuário e enviar mensagens
+	// Goroutine para ler a entrada do usuário e processar comandos/mensagens
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)
+		fmt.Println("Digite mensagens para enviar ou comandos começando com '/':")
+		fmt.Println("Comandos disponíveis: /ping, /help")
+
 		for scanner.Scan() {
-			text := scanner.Text()
-			if text != "" {
+			text := strings.TrimSpace(scanner.Text())
+			if text == "" {
+				continue
+			}
+
+			// Processar comandos que começam com "/"
+			if strings.HasPrefix(text, "/") {
+				handleCommand(text, conn)
+			} else {
+				// Enviar mensagem normal
 				fmt.Fprintln(conn, "MSG "+text)
 			}
 		}
@@ -88,6 +110,37 @@ func handleConn(conn net.Conn) {
 
 	// Aguarda indefinidamente
 	select {}
+}
+
+func handleCommand(command string, conn net.Conn) {
+	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		return
+	}
+
+	cmd := strings.ToLower(parts[0])
+
+	switch cmd {
+	case "/ping":
+		pingMutex.Lock()
+		showPing = !showPing
+		pingMutex.Unlock()
+
+		if showPing {
+			fmt.Println("Exibição de RTT ativada. Você verá a latência a cada ping.")
+		} else {
+			fmt.Println("Exibição de RTT desativada.")
+		}
+
+	case "/help":
+		fmt.Println("Comandos disponíveis:")
+		fmt.Println("  /ping  - Liga/desliga a exibição do RTT (latência)")
+		fmt.Println("  /help  - Mostra esta mensagem de ajuda")
+		fmt.Println("\nDigite qualquer outra coisa para enviar uma mensagem para outros jogadores.")
+
+	default:
+		fmt.Printf("Comando desconhecido: %s. Digite /help para ver os comandos disponíveis.\n", cmd)
+	}
 }
 
 func getEnv(k, def string) string {

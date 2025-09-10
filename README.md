@@ -12,11 +12,13 @@ A aplicação cliente-servidor é desenvolvida em Go e a comunicação é realiz
 
 - **Partidas 1v1**: O sistema permite que múltiplos jogadores se conectem simultaneamente e os pareia em duelos únicos, garantindo que um jogador não enfrente vários oponentes ao mesmo tempo.
 
-- **Visualização de Atraso**: Sistema implementado de PING/PONG que permite aos jogadores visualizar em tempo real a latência (RTT - Round-Trip Time) de sua comunicação com o servidor, exibindo valores como `RTT: 3 ms` no console.
+- **Visualização de Atraso**: Sistema implementado de PING/PONG que permite aos jogadores visualizar a latência (RTT - Round-Trip Time) de sua comunicação com o servidor quando solicitado através do comando `/ping`, exibindo valores como `RTT: 3 ms` no console.
 
 - **Sistema de Pacotes de Cartas**: Uma mecânica central para adquirir novas cartas é a abertura de pacotes. O servidor gerencia um "estoque" global e trata requisições concorrentes de forma justa para evitar duplicação ou perda de cartas.
 
 - **Chat em Tempo Real**: Sistema de comunicação entre jogadores baseado em salas, permitindo coordenação e interação social durante as partidas.
+
+- **Sistema de Comandos**: Interface de comandos no cliente que permite aos jogadores controlar funcionalidades específicas através de comandos que começam com `/`, como `/ping` para controlar a exibição de latência e `/help` para obter ajuda.
 
 - **Ambiente Containerizado**: Todos os componentes são desenvolvidos e testados em contêineres Docker, permitindo a fácil execução e escalabilidade para testes.
 
@@ -62,17 +64,21 @@ Para interagir com a aplicação, você pode se conectar a uma sessão interativ
    ```
 
 5. **Agora você pode**:
-   - **Monitorar a latência**: Observe as mensagens `RTT: X ms` que aparecem automaticamente a cada 2 segundos, mostrando a qualidade da conexão com o servidor
+   - **Usar comandos**: Digite `/help` para ver todos os comandos disponíveis
+   - **Monitorar a latência**: Use o comando `/ping` para ativar/desativar a exibição das mensagens `RTT: X ms` que mostram a qualidade da conexão com o servidor
    - **Comunicar entre jogadores**: Digite mensagens que serão transmitidas para outros jogadores na mesma sala
    - **Testar a conectividade**: Verifique a estabilidade da comunicação cliente-servidor através dos logs detalhados
 
 ### Exemplo de Saída do Cliente:
 ```
 [CLIENT] connected to 172.20.0.2:9000
-[CLIENT] <- "ACK 1755907668723"
+Digite mensagens para enviar ou comandos começando com '/':
+Comandos disponíveis: /ping, /help
+Server: Você entrou na fila. Aguardando oponente...
+Received: Partida encontrada! Você está jogando contra 172.20.0.3:45678
+/ping
+Exibição de RTT ativada. Você verá a latência a cada ping.
 RTT: 3 ms
-[CLIENT] RTT calculated: 3 ms
-Received: Pronto para o duelo!
 RTT: 2 ms
 ```
 
@@ -114,11 +120,16 @@ RTT: 2 ms
 
 ### Protocolo de Mensagens:
 
-- `CMD JOIN <sala>`: Cliente entra em uma sala de jogo
+- `CMD FIND_MATCH`: Cliente entra na fila de matchmaking para encontrar partida
 - `PING <timestamp>`: Solicitação de latência com timestamp para monitoramento de qualidade da conexão
 - `PONG <timestamp>`: Resposta de latência ecoando o timestamp original
 - `MSG <texto>`: Mensagem de comunicação entre jogadores
-- `ACK <timestamp>`: Confirmação de comando executado pelo servidor
+- `ACK <texto>`: Confirmação de comando executado pelo servidor
+
+### Comandos do Cliente:
+
+- `/ping`: Liga/desliga a exibição de RTT (latência) no console
+- `/help`: Mostra a lista de comandos disponíveis
 
 ## Status do Desenvolvimento
 
@@ -127,7 +138,8 @@ RTT: 2 ms
 - [x] Sistema de monitoramento de latência (PING/PONG RTT)
 - [x] Chat em tempo real entre jogadores
 - [x] Containerização completa com Docker
-- [x] Sistema de salas básico
+- [x] Sistema de matchmaking 1v1 básico
+- [x] Sistema de comandos no cliente (/ping, /help)
 
 **Próximas Fases:**
 - [ ] Implementação da lógica de duelos 1v1
