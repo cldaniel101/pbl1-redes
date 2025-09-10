@@ -1,0 +1,44 @@
+# Arquivos executáveis compilados
+*.exe
+*.bin
+*.out
+*.app
+
+# Arquivos temporários do Go
+*.test
+*.prof
+
+# Arquivos de build
+/build/
+/dist/
+/target/
+
+# Arquivos de IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Dependências
+/vendor/
+
+# Arquivos de configuração local
+.env
+.env.local
+.env.production
+.env.development
+
+# Arquivos Docker locais
+docker-compose.override.yml
+
+# Arquivos de teste
+coverage.out
+coverage.html
