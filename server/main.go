@@ -1,201 +1,358 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"log"
 	"net"
 	"os"
-	"strings"
+	"pingpong/server/game"
+	"pingpong/server/protocol"
 	"sync"
 	"time"
 )
 
-// Player representa um jogador conectado, com um ID único e sua conexão.
-type Player struct {
-	ID   string
-	Conn net.Conn
+// GameServer representa o servidor do jogo
+type GameServer struct {
+	cardDB           *game.CardDB
+	packSystem       *game.PackSystem
+	playersOnline    map[string]*protocol.PlayerConn
+	matchmakingQueue []*protocol.PlayerConn
+	activeMatches    map[string]*game.Match
+	mu               sync.RWMutex
 }
 
-// Match representa um duelo 1v1 entre dois jogadores.
-type Match struct {
-	Player1 *Player
-	Player2 *Player
-}
-
-var (
-	// 'matchmakingQueue' é a "sala de espera". É uma lista de jogadores esperando por um oponente.
-	matchmakingQueue []*Player
-	// 'activeMatches' guarda um registro de todas as partidas que estão em andamento.
-	activeMatches = make(map[*Player]*Match)
-	// O Mutex continua sendo "cadeado" de segurança para proteger a fila e as partidas.
-	mu sync.Mutex
-)
-
-// tryCreateMatch é a nossa função "organizadora". Ela verifica a fila de espera.
-func tryCreateMatch() {
-	// Trancamos o cadeado para mexer na fila com segurança.
-	mu.Lock()
-	// No final da função, garantimos que o cadeado será destrancado.
-	defer mu.Unlock()
-
-	// A condição principal: só criamos uma partida se tivermos 2 ou mais jogadores na fila.
-	if len(matchmakingQueue) >= 2 {
-		// Pegamos os dois primeiros jogadores da fila.
-		player1 := matchmakingQueue[0]
-		player2 := matchmakingQueue[1]
-
-		// Removemos esses dois jogadores da fila, pois eles não estão mais esperando.
-		matchmakingQueue = matchmakingQueue[2:]
-
-		// Criamos a estrutura da partida com os dois jogadores.
-		match := &Match{
-			Player1: player1,
-			Player2: player2,
-		}
-
-		// Guardamos a referência da partida para cada jogador.
-		activeMatches[player1] = match
-		activeMatches[player2] = match
-
-		// Log para sabermos que a partida foi criada.
-		log.Printf("[SERVER] Partida criada entre %s e %s", player1.ID, player2.ID)
-
-		// Avisamos aos jogadores que a partida começou!
-		fmt.Fprintln(player1.Conn, "MSG Partida encontrada! Você está jogando contra "+player2.ID)
-		fmt.Fprintln(player2.Conn, "MSG Partida encontrada! Você está jogando contra "+player1.ID)
-
-		// LÓGICA DO JOGO...
-		// Por enquanto, estou apenas avisando que eles foram pareados.
+// NewGameServer cria um novo servidor do jogo
+func NewGameServer() *GameServer {
+	// Inicializa CardDB
+	cardDB := game.NewCardDB()
+	if err := cardDB.LoadFromFile("cards.json"); err != nil {
+		log.Fatalf("[SERVER] Erro ao carregar cartas: %v", err)
 	}
+
+	// Inicializa sistema de pacotes
+	packConfig := game.PackConfig{
+		CardsPerPack: 3,
+		Stock:        100,
+		RNGSeed:      0, // seed aleatório
+	}
+	packSystem := game.NewPackSystem(packConfig, cardDB)
+
+	return &GameServer{
+		cardDB:           cardDB,
+		packSystem:       packSystem,
+		playersOnline:    make(map[string]*protocol.PlayerConn),
+		matchmakingQueue: make([]*protocol.PlayerConn, 0),
+		activeMatches:    make(map[string]*game.Match),
+	}
+}
+
+// tryCreateMatch verifica a fila de matchmaking e cria partidas
+func (gs *GameServer) tryCreateMatch() {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+
+	// Precisa de pelo menos 2 jogadores na fila
+	if len(gs.matchmakingQueue) < 2 {
+		return
+	}
+
+	// Pega os dois primeiros jogadores da fila
+	p1 := gs.matchmakingQueue[0]
+	p2 := gs.matchmakingQueue[1]
+	gs.matchmakingQueue = gs.matchmakingQueue[2:]
+
+	// Gera ID único para a partida
+	matchID := fmt.Sprintf("match_%d", time.Now().UnixNano())
+
+	// Cria a partida
+	match := game.NewMatch(matchID, p1, p2, gs.cardDB)
+	gs.activeMatches[matchID] = match
+
+	log.Printf("[SERVER] Partida criada: %s entre %s e %s", matchID, p1.ID, p2.ID)
+
+	// Envia MATCH_FOUND para ambos jogadores
+	p1.SendMsg(protocol.ServerMsg{
+		T:          protocol.MATCH_FOUND,
+		MatchID:    matchID,
+		OpponentID: p2.ID,
+	})
+
+	p2.SendMsg(protocol.ServerMsg{
+		T:          protocol.MATCH_FOUND,
+		MatchID:    matchID,
+		OpponentID: p1.ID,
+	})
+
+	// Envia estado inicial
+	match.BroadcastState()
+
+	// Monitora o fim da partida
+	go gs.monitorMatch(match)
+}
+
+// monitorMatch monitora uma partida até seu término
+func (gs *GameServer) monitorMatch(match *game.Match) {
+	<-match.Done()
+
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+
+	// Remove a partida da lista de partidas ativas
+	delete(gs.activeMatches, match.ID)
+	log.Printf("[SERVER] Partida %s finalizada e removida", match.ID)
+}
+
+// findPlayerMatch encontra a partida de um jogador
+func (gs *GameServer) findPlayerMatch(playerID string) *game.Match {
+	gs.mu.RLock()
+	defer gs.mu.RUnlock()
+
+	for _, match := range gs.activeMatches {
+		if match.P1.ID == playerID || match.P2.ID == playerID {
+			return match
+		}
+	}
+	return nil
 }
 
 func main() {
 	addr := getEnv("LISTEN_ADDR", ":9000")
 
-	log.Printf("[SERVER] starting on %s ...", addr)
+	log.Printf("[SERVER] Iniciando servidor Attribute War em %s ...", addr)
+
+	// Cria o servidor do jogo
+	gameServer := NewGameServer()
+
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("[SERVER] listen error: %v", err)
+		log.Fatalf("[SERVER] Erro ao escutar: %v", err)
 	}
 	defer ln.Close()
 
-	// Inicia uma goroutine que fica tentando criar partidas a cada segundo.
+	// Goroutine para matchmaking contínuo
 	go func() {
-		for {
-			tryCreateMatch()
-			time.Sleep(1 * time.Second) // Espera 1 segundo antes de checar a fila de novo.
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			gameServer.tryCreateMatch()
 		}
 	}()
+
+	log.Printf("[SERVER] Servidor pronto! Aguardando conexões...")
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("[SERVER] accept error: %v", err)
+			log.Printf("[SERVER] Erro ao aceitar conexão: %v", err)
 			continue
 		}
-		go handleConn(conn)
+		go gameServer.handleConn(conn)
 	}
 }
 
-func handleConn(conn net.Conn) {
+// handleConn processa uma nova conexão de cliente
+func (gs *GameServer) handleConn(conn net.Conn) {
 	peer := conn.RemoteAddr().String()
-	log.Printf("[SERVER] connection from %s", peer)
+	log.Printf("[SERVER] Nova conexão de %s", peer)
 
-	// Criamos um novo jogador para esta conexão.
-	// O ID pode ser o endereço de rede ou um nome que o jogador envie.
-	currentPlayer := &Player{
-		ID:   peer,
-		Conn: conn,
-	}
+	// Cria PlayerConn
+	player := protocol.NewPlayerConn(peer, conn)
 
-	// Lógica de limpeza quando o jogador desconectar.
+	// Registra o jogador
+	gs.mu.Lock()
+	gs.playersOnline[peer] = player
+	gs.mu.Unlock()
+
+	// Limpeza quando desconectar
 	defer func() {
-		log.Printf("[SERVER] closing %s", peer)
-		mu.Lock()
-
-		// Se o jogador estava em uma partida, precisamos notificar o oponente.
-		if match, ok := activeMatches[currentPlayer]; ok {
-			var opponent *Player
-			if match.Player1 == currentPlayer {
-				opponent = match.Player2
-			} else {
-				opponent = match.Player1
-			}
-
-			if opponent != nil {
-				fmt.Fprintln(opponent.Conn, "MSG Seu oponente desconectou.")
-			}
-			// Remove a partida da lista de partidas ativas.
-			delete(activeMatches, match.Player1)
-			delete(activeMatches, match.Player2)
-		} else {
-			// Se ele não estava em partida, talvez estivesse na fila. Vamos removê-lo.
-			for i, p := range matchmakingQueue {
-				if p == currentPlayer {
-					matchmakingQueue = append(matchmakingQueue[:i], matchmakingQueue[i+1:]...)
-					break
-				}
-			}
-		}
-
-		mu.Unlock()
+		log.Printf("[SERVER] Desconectando %s", peer)
+		gs.cleanup(player)
 		conn.Close()
 	}()
 
-	r := bufio.NewScanner(conn)
-	for r.Scan() {
-		line := strings.TrimSpace(r.Text())
-		log.Printf("[SERVER] <- from %s: %q", peer, line)
-
-		// Vamos criar um novo comando para entrar na fila!
-		if line == "CMD FIND_MATCH" {
-			log.Printf("[SERVER] Jogador %s entrou na fila de matchmaking.", currentPlayer.ID)
-			fmt.Fprintln(currentPlayer.Conn, "ACK Você entrou na fila. Aguardando oponente...")
-
-			mu.Lock()
-			// Adiciona o jogador à fila de espera.
-			matchmakingQueue = append(matchmakingQueue, currentPlayer)
-			mu.Unlock()
-			continue
+	// Loop principal de mensagens
+	for {
+		msg, err := player.ReadMsg()
+		if err != nil {
+			log.Printf("[SERVER] Erro ao ler de %s: %v", peer, err)
+			break
+		}
+		if msg == nil {
+			break // EOF
 		}
 
-		// Se o jogador estiver em uma partida, as mensagens dele devem ir para o oponente.
-		if strings.HasPrefix(line, "MSG ") {
-			mu.Lock()
-			if match, ok := activeMatches[currentPlayer]; ok {
-				var opponent *Player
-				if match.Player1 == currentPlayer {
-					opponent = match.Player2
-				} else {
-					opponent = match.Player1
-				}
+		log.Printf("[SERVER] <- %s: %s", peer, msg.T)
+		gs.handleMessage(player, msg)
+	}
+}
 
-				if opponent != nil {
-					// Envia a mensagem para o oponente.
-					fmt.Fprintln(opponent.Conn, line)
-				}
+// cleanup remove o jogador do sistema
+func (gs *GameServer) cleanup(player *protocol.PlayerConn) {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+
+	// Remove da lista de jogadores online
+	delete(gs.playersOnline, player.ID)
+
+	// Remove da fila de matchmaking
+	for i, p := range gs.matchmakingQueue {
+		if p.ID == player.ID {
+			gs.matchmakingQueue = append(gs.matchmakingQueue[:i], gs.matchmakingQueue[i+1:]...)
+			break
+		}
+	}
+
+	// Notifica oponente se estava em partida
+	for _, match := range gs.activeMatches {
+		if match.P1.ID == player.ID || match.P2.ID == player.ID {
+			var opponent *protocol.PlayerConn
+			if match.P1.ID == player.ID {
+				opponent = match.P2
+			} else {
+				opponent = match.P1
 			}
-			mu.Unlock()
-			continue
-		}
 
-		// Você pode manter a lógica de PING/PONG como está.
-		if strings.HasPrefix(line, "PING ") {
-			timestamp := strings.TrimPrefix(line, "PING ")
-			resp := fmt.Sprintf("PONG %s", timestamp)
-			fmt.Fprintln(conn, resp)
-			log.Printf("[SERVER] -> to %s: %q (pong response)", peer, resp)
-			continue
-		}
+			if opponent != nil {
+				opponent.SendMsg(protocol.ServerMsg{
+					T:    protocol.ERROR,
+					Code: "OPPONENT_DISCONNECTED",
+					Msg:  "Seu oponente desconectou",
+				})
+				opponent.SendMsg(protocol.ServerMsg{
+					T:      protocol.MATCH_END,
+					Result: protocol.WIN,
+				})
+			}
 
-		// Mensagem de erro para comandos desconhecidos.
-		fmt.Fprintln(conn, "ERR unknown command")
+			// Remove a partida
+			delete(gs.activeMatches, match.ID)
+			break
+		}
+	}
+}
+
+// handleMessage processa uma mensagem do cliente
+func (gs *GameServer) handleMessage(player *protocol.PlayerConn, msg *protocol.ClientMsg) {
+	switch msg.T {
+	case protocol.FIND_MATCH:
+		gs.handleFindMatch(player)
+	case protocol.PLAY:
+		gs.handlePlay(player, msg.CardID)
+	case protocol.CHAT:
+		gs.handleChat(player, msg.Text)
+	case protocol.PING:
+		gs.handlePing(player, msg.TS)
+	case protocol.OPEN_PACK:
+		gs.handleOpenPack(player)
+	case protocol.LEAVE:
+		gs.handleLeave(player)
+	default:
+		player.SendMsg(protocol.ServerMsg{
+			T:    protocol.ERROR,
+			Code: protocol.INVALID_MESSAGE,
+			Msg:  "Tipo de mensagem desconhecido",
+		})
+	}
+}
+
+// handleFindMatch adiciona jogador à fila de matchmaking
+func (gs *GameServer) handleFindMatch(player *protocol.PlayerConn) {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+
+	// Verifica se já está na fila
+	for _, p := range gs.matchmakingQueue {
+		if p.ID == player.ID {
+			return
+		}
 	}
 
-	if err := r.Err(); err != nil {
-		log.Printf("[SERVER] read error from %s: %v", peer, err)
+	// Adiciona à fila
+	gs.matchmakingQueue = append(gs.matchmakingQueue, player)
+	log.Printf("[SERVER] %s entrou na fila de matchmaking", player.ID)
+}
+
+// handlePlay processa uma jogada
+func (gs *GameServer) handlePlay(player *protocol.PlayerConn, cardID string) {
+	match := gs.findPlayerMatch(player.ID)
+	if match == nil {
+		player.SendMsg(protocol.ServerMsg{
+			T:    protocol.ERROR,
+			Code: protocol.MATCH_NOT_FOUND,
+			Msg:  "Você não está em uma partida",
+		})
+		return
 	}
+
+	if err := match.PlayCard(player.ID, cardID); err != nil {
+		player.SendMsg(protocol.ServerMsg{
+			T:    protocol.ERROR,
+			Code: protocol.INVALID_CARD,
+			Msg:  err.Error(),
+		})
+		return
+	}
+
+	log.Printf("[SERVER] %s jogou carta %s", player.ID, cardID)
+}
+
+// handleChat processa mensagens de chat
+func (gs *GameServer) handleChat(player *protocol.PlayerConn, text string) {
+	match := gs.findPlayerMatch(player.ID)
+	if match == nil {
+		return
+	}
+
+	var opponent *protocol.PlayerConn
+	if match.P1.ID == player.ID {
+		opponent = match.P2
+	} else {
+		opponent = match.P1
+	}
+
+	if opponent != nil {
+		// Envia mensagem para o oponente (implementação básica)
+		log.Printf("[SERVER] Chat de %s para %s: %s", player.ID, opponent.ID, text)
+	}
+}
+
+// handlePing responde com PONG
+func (gs *GameServer) handlePing(player *protocol.PlayerConn, ts int64) {
+	player.LastPing = time.Now().UnixMilli()
+	rtt := player.LastPing - ts
+
+	player.SendMsg(protocol.ServerMsg{
+		T:     protocol.PONG,
+		TS:    ts,
+		RTTMs: rtt,
+	})
+}
+
+// handleOpenPack processa abertura de pacote
+func (gs *GameServer) handleOpenPack(player *protocol.PlayerConn) {
+	cards, err := gs.packSystem.OpenPack(player.ID)
+	if err != nil {
+		player.SendMsg(protocol.ServerMsg{
+			T:    protocol.ERROR,
+			Code: protocol.OUT_OF_STOCK,
+			Msg:  err.Error(),
+		})
+		return
+	}
+
+	player.SendMsg(protocol.ServerMsg{
+		T:     protocol.PACK_OPENED,
+		Cards: cards,
+		Stock: gs.packSystem.GetStock(),
+	})
+
+	log.Printf("[SERVER] %s abriu pacote: %v", player.ID, cards)
+}
+
+// handleLeave remove jogador da fila ou partida
+func (gs *GameServer) handleLeave(player *protocol.PlayerConn) {
+	gs.cleanup(player)
 }
 
 func getEnv(k, def string) string {

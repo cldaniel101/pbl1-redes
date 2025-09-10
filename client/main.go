@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -12,8 +13,66 @@ import (
 	"time"
 )
 
+// Estruturas de mensagens (simplificadas para o cliente)
+type ClientMsg struct {
+	T      string `json:"t"`
+	CardID string `json:"cardId,omitempty"`
+	Text   string `json:"text,omitempty"`
+	TS     int64  `json:"ts,omitempty"`
+}
+
+type ServerMsg struct {
+	T          string      `json:"t"`
+	MatchID    string      `json:"matchId,omitempty"`
+	OpponentID string      `json:"opponentId,omitempty"`
+	You        *PlayerView `json:"you,omitempty"`
+	Opponent   *PlayerView `json:"opponent,omitempty"`
+	Round      int         `json:"round,omitempty"`
+	DeadlineMs int64       `json:"deadlineMs,omitempty"`
+	Cards      []string    `json:"cards,omitempty"`
+	Stock      int         `json:"stock,omitempty"`
+	Code       string      `json:"code,omitempty"`
+	Msg        string      `json:"msg,omitempty"`
+	TS         int64       `json:"ts,omitempty"`
+	RTTMs      int64       `json:"rttMs,omitempty"`
+	Result     string      `json:"result,omitempty"`
+	Logs       []string    `json:"logs,omitempty"`
+}
+
+type PlayerView struct {
+	HP           int      `json:"hp"`
+	Hand         []string `json:"hand,omitempty"`
+	HandSize     int      `json:"handSize,omitempty"`
+	CardID       string   `json:"cardId,omitempty"`
+	ElementBonus int      `json:"elementBonus,omitempty"`
+	DmgDealt     int      `json:"dmgDealt,omitempty"`
+	DmgTaken     int      `json:"dmgTaken,omitempty"`
+}
+
+// Estrutura para informações das cartas (simulada do servidor)
+type Card struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Element string `json:"element"`
+	ATK     int    `json:"atk"`
+	DEF     int    `json:"def"`
+}
+
+// Base de dados de cartas local (simulada - em um jogo real viria do servidor)
+var cardDB = map[string]Card{
+	"c_001": {ID: "c_001", Name: "Fire Dragon", Element: "FIRE", ATK: 8, DEF: 5},
+	"c_002": {ID: "c_002", Name: "Ice Mage", Element: "WATER", ATK: 6, DEF: 6},
+	"c_003": {ID: "c_003", Name: "Vine Beast", Element: "PLANT", ATK: 7, DEF: 4},
+	"c_004": {ID: "c_004", Name: "Flame Warrior", Element: "FIRE", ATK: 6, DEF: 7},
+	"c_005": {ID: "c_005", Name: "Water Serpent", Element: "WATER", ATK: 9, DEF: 3},
+	"c_006": {ID: "c_006", Name: "Forest Guardian", Element: "PLANT", ATK: 5, DEF: 8},
+	"c_007": {ID: "c_007", Name: "Inferno Titan", Element: "FIRE", ATK: 10, DEF: 2},
+	"c_008": {ID: "c_008", Name: "Frost Giant", Element: "WATER", ATK: 7, DEF: 7},
+	"c_009": {ID: "c_009", Name: "Nature Spirit", Element: "PLANT", ATK: 4, DEF: 9},
+}
+
 func main() {
-	addr := getEnv("SERVER_ADDR", "server:9000")
+	addr := getEnv("SERVER_ADDR", "localhost:9000")
 	for {
 		log.Printf("[CLIENT] dialing %s ...", addr)
 		conn, err := net.Dial("tcp", addr)
@@ -27,83 +86,83 @@ func main() {
 }
 
 var (
-	showPing  bool
-	pingMutex sync.RWMutex
+	showPing    bool
+	pingMutex   sync.RWMutex
+	inMatch     bool
+	currentHand []string
+	gameState   *ServerMsg
 )
 
 func handleConn(conn net.Conn) {
 	defer conn.Close()
 	peer := conn.RemoteAddr().String()
-	log.Printf("[CLIENT] connected to %s", peer)
+	log.Printf("[CLIENT] Conectado ao servidor %s", peer)
+
+	encoder := json.NewEncoder(conn)
+	scanner := bufio.NewScanner(conn)
 
 	// Goroutine para receber mensagens do servidor
 	go func() {
-		r := bufio.NewScanner(conn)
-		for r.Scan() {
-			line := strings.TrimSpace(r.Text())
-
-			if strings.HasPrefix(line, "MSG ") {
-				fmt.Printf("Received: %s\n", strings.TrimPrefix(line, "MSG "))
-			} else if strings.HasPrefix(line, "PONG ") {
-				// Processar resposta PONG e calcular RTT
-				timestampStr := strings.TrimPrefix(line, "PONG ")
-				if sentTime, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
-					currentTime := time.Now().UnixMilli()
-					rtt := currentTime - sentTime
-
-					// Mostrar RTT apenas se o usuário habilitou via comando /ping
-					pingMutex.RLock()
-					if showPing {
-						fmt.Printf("RTT: %d ms\n", rtt)
-					}
-					pingMutex.RUnlock()
-				} else {
-					log.Printf("[CLIENT] error parsing PONG timestamp: %v", err)
-				}
-			} else if strings.HasPrefix(line, "ACK ") {
-				fmt.Printf("Server: %s\n", strings.TrimPrefix(line, "ACK "))
+		for scanner.Scan() {
+			line := scanner.Text()
+			var msg ServerMsg
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				log.Printf("[CLIENT] Erro ao decodificar JSON: %v", err)
+				continue
 			}
+			handleServerMessage(&msg)
 		}
-		if err := r.Err(); err != nil {
-			log.Printf("[CLIENT] read error: %v", err)
+		if err := scanner.Err(); err != nil {
+			log.Printf("[CLIENT] Erro de leitura: %v", err)
 		}
-		log.Printf("[CLIENT] server closed connection")
+		log.Printf("[CLIENT] Servidor fechou a conexão")
 	}()
 
-	// Envia o comando para entrar na fila de matchmaking
-	fmt.Fprintln(conn, "CMD FIND_MATCH")
+	// Envia FIND_MATCH automaticamente
+	sendMessage(encoder, ClientMsg{T: "FIND_MATCH"})
+	fmt.Println("🔍 Procurando partida...")
 
 	// Goroutine para enviar PINGs periódicos
-	pingInterval := getPingInterval()
 	go func() {
-		ticker := time.NewTicker(pingInterval)
+		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 
 		for range ticker.C {
 			timestamp := time.Now().UnixMilli()
-			pingMsg := fmt.Sprintf("PING %d", timestamp)
-			fmt.Fprintln(conn, pingMsg)
+			sendMessage(encoder, ClientMsg{T: "PING", TS: timestamp})
 		}
 	}()
 
-	// Goroutine para ler a entrada do usuário e processar comandos/mensagens
+	// Goroutine para ler entrada do usuário
 	go func() {
-		scanner := bufio.NewScanner(os.Stdin)
-		fmt.Println("Digite mensagens para enviar ou comandos começando com '/':")
-		fmt.Println("Comandos disponíveis: /ping, /help")
+		inputScanner := bufio.NewScanner(os.Stdin)
+		fmt.Println("\n=== ATTRIBUTE WAR CLIENT ===")
+		fmt.Println("Comandos disponíveis:")
+		fmt.Println("  /play <idx> - Jogar carta pelo índice (1-5)")
+		fmt.Println("  /hand       - Mostrar sua mão atual")
+		fmt.Println("  /ping       - Liga/desliga exibição de RTT")
+		fmt.Println("  /pack       - Abrir pacote de cartas")
+		fmt.Println("  /help       - Mostrar ajuda")
+		fmt.Println("  /quit       - Sair do jogo")
+		fmt.Println("  [1-5]       - Atalho para jogar carta")
+		fmt.Println("  <mensagem>  - Enviar chat")
+		fmt.Println()
 
-		for scanner.Scan() {
-			text := strings.TrimSpace(scanner.Text())
+		for inputScanner.Scan() {
+			text := strings.TrimSpace(inputScanner.Text())
 			if text == "" {
 				continue
 			}
 
-			// Processar comandos que começam com "/"
 			if strings.HasPrefix(text, "/") {
-				handleCommand(text, conn)
+				handleCommand(text, encoder)
+			} else if inMatch && len(text) == 1 && text >= "1" && text <= "5" {
+				// Atalho para jogar carta por índice
+				cardIndex, _ := strconv.Atoi(text)
+				playCardByIndex(cardIndex, encoder)
 			} else {
-				// Enviar mensagem normal
-				fmt.Fprintln(conn, "MSG "+text)
+				// Enviar chat
+				sendMessage(encoder, ClientMsg{T: "CHAT", Text: text})
 			}
 		}
 	}()
@@ -112,7 +171,143 @@ func handleConn(conn net.Conn) {
 	select {}
 }
 
-func handleCommand(command string, conn net.Conn) {
+func sendMessage(encoder *json.Encoder, msg ClientMsg) {
+	if err := encoder.Encode(msg); err != nil {
+		log.Printf("[CLIENT] Erro ao enviar mensagem: %v", err)
+	}
+}
+
+// playCardByIndex joga uma carta pelo índice (1-5)
+func playCardByIndex(cardIndex int, encoder *json.Encoder) {
+	if !inMatch {
+		fmt.Println("❌ Você não está em uma partida!")
+		return
+	}
+
+	if cardIndex < 1 || cardIndex > len(currentHand) {
+		fmt.Printf("❌ Índice inválido! Use 1-%d\n", len(currentHand))
+		return
+	}
+
+	cardID := currentHand[cardIndex-1]
+	card, exists := cardDB[cardID]
+	if !exists {
+		fmt.Printf("🎴 Jogando carta %d: %s\n", cardIndex, cardID)
+	} else {
+		fmt.Printf("🎴 Jogando carta %d: %s (%s %d/%d)\n",
+			cardIndex, card.Name, card.Element, card.ATK, card.DEF)
+	}
+
+	sendMessage(encoder, ClientMsg{T: "PLAY", CardID: cardID})
+}
+
+// showHand exibe a mão atual com detalhes das cartas
+func showHand() {
+	if !inMatch || len(currentHand) == 0 {
+		fmt.Println("❌ Você não está em uma partida ou não tem cartas na mão!")
+		return
+	}
+
+	fmt.Println("\n🃏 === SUA MÃO ===")
+	for i, cardID := range currentHand {
+		card, exists := cardDB[cardID]
+		if exists {
+			fmt.Printf("  [%d] %s - %s (ATK: %d / DEF: %d)\n",
+				i+1, card.Name, card.Element, card.ATK, card.DEF)
+		} else {
+			fmt.Printf("  [%d] %s (dados não disponíveis)\n", i+1, cardID)
+		}
+	}
+	fmt.Println()
+}
+
+func handleServerMessage(msg *ServerMsg) {
+	switch msg.T {
+	case "MATCH_FOUND":
+		fmt.Printf("🎮 Partida encontrada! Oponente: %s\n", msg.OpponentID)
+		inMatch = true
+
+	case "STATE":
+		gameState = msg
+		currentHand = msg.You.Hand
+		fmt.Printf("\n=== RODADA %d ===\n", msg.Round)
+		fmt.Printf("💚 Seu HP: %d | ❤️ HP do Oponente: %d\n", msg.You.HP, msg.Opponent.HP)
+		fmt.Printf("🃏 Sua mão (%d cartas):\n", len(msg.You.Hand))
+		for i, cardID := range msg.You.Hand {
+			card, exists := cardDB[cardID]
+			if exists {
+				fmt.Printf("  [%d] %s - %s (ATK: %d / DEF: %d)\n",
+					i+1, card.Name, card.Element, card.ATK, card.DEF)
+			} else {
+				fmt.Printf("  [%d] %s\n", i+1, cardID)
+			}
+		}
+		fmt.Printf("⏰ Tempo para jogar: %.1f segundos\n", float64(msg.DeadlineMs)/1000)
+		fmt.Println("Digite o número da carta (1-5) ou use /play <número>:")
+
+	case "ROUND_RESULT":
+		fmt.Println("\n=== RESULTADO DA RODADA ===")
+
+		// Informações da sua carta
+		yourCard, yourExists := cardDB[msg.You.CardID]
+		if yourExists {
+			fmt.Printf("🎴 Você jogou: %s (ATK %d", yourCard.Name, yourCard.ATK)
+			if msg.You.ElementBonus > 0 {
+				fmt.Printf("+%d", msg.You.ElementBonus)
+			}
+			fmt.Print(")")
+		} else {
+			fmt.Printf("🎴 Você jogou: %s", msg.You.CardID)
+		}
+
+		// Informações da carta do oponente
+		oppCard, oppExists := cardDB[msg.Opponent.CardID]
+		if oppExists {
+			fmt.Printf("\n🎴 Oponente jogou: %s (DEF %d)", oppCard.Name, oppCard.DEF)
+		} else {
+			fmt.Printf("\n🎴 Oponente jogou: %s", msg.Opponent.CardID)
+		}
+
+		fmt.Printf("\n⚔️ Dano causado: %d | 🛡️ Dano recebido: %d\n", msg.You.DmgDealt, msg.You.DmgTaken)
+		fmt.Printf("💚 Seu HP: %d | ❤️ HP do Oponente: %d\n", msg.You.HP, msg.Opponent.HP)
+
+		if len(msg.Logs) > 0 {
+			fmt.Println("📜 Logs:")
+			for _, log := range msg.Logs {
+				fmt.Printf("  %s\n", log)
+			}
+		}
+
+	case "MATCH_END":
+		fmt.Printf("\n🏁 PARTIDA FINALIZADA! Resultado: %s\n", msg.Result)
+		switch msg.Result {
+		case "WIN":
+			fmt.Println("🎉 VITÓRIA! Parabéns!")
+		case "LOSE":
+			fmt.Println("😞 Derrota... Tente novamente!")
+		case "DRAW":
+			fmt.Println("🤝 Empate!")
+		}
+		inMatch = false
+		currentHand = nil
+
+	case "PACK_OPENED":
+		fmt.Printf("📦 Pacote aberto! Cartas recebidas: %v\n", msg.Cards)
+		fmt.Printf("📊 Estoque restante: %d pacotes\n", msg.Stock)
+
+	case "ERROR":
+		fmt.Printf("❌ Erro [%s]: %s\n", msg.Code, msg.Msg)
+
+	case "PONG":
+		pingMutex.RLock()
+		if showPing {
+			fmt.Printf("🏓 RTT: %d ms\n", msg.RTTMs)
+		}
+		pingMutex.RUnlock()
+	}
+}
+
+func handleCommand(command string, encoder *json.Encoder) {
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
 		return
@@ -121,25 +316,55 @@ func handleCommand(command string, conn net.Conn) {
 	cmd := strings.ToLower(parts[0])
 
 	switch cmd {
+	case "/play":
+		if len(parts) < 2 {
+			fmt.Println("❌ Uso: /play <índice> (exemplo: /play 1)")
+			return
+		}
+		cardIndex, err := strconv.Atoi(parts[1])
+		if err != nil {
+			fmt.Println("❌ Índice deve ser um número entre 1-5")
+			return
+		}
+		playCardByIndex(cardIndex, encoder)
+
+	case "/hand":
+		showHand()
+
 	case "/ping":
 		pingMutex.Lock()
 		showPing = !showPing
 		pingMutex.Unlock()
 
 		if showPing {
-			fmt.Println("Exibição de RTT ativada. Você verá a latência a cada ping.")
+			fmt.Println("🏓 Exibição de RTT ativada")
 		} else {
-			fmt.Println("Exibição de RTT desativada.")
+			fmt.Println("🏓 Exibição de RTT desativada")
 		}
 
+	case "/pack":
+		sendMessage(encoder, ClientMsg{T: "OPEN_PACK"})
+		fmt.Println("📦 Tentando abrir pacote...")
+
 	case "/help":
-		fmt.Println("Comandos disponíveis:")
-		fmt.Println("  /ping  - Liga/desliga a exibição do RTT (latência)")
-		fmt.Println("  /help  - Mostra esta mensagem de ajuda")
-		fmt.Println("\nDigite qualquer outra coisa para enviar uma mensagem para outros jogadores.")
+		fmt.Println("\n=== AJUDA ===")
+		fmt.Println("  /play <idx> - Jogar carta pelo índice (1-5)")
+		fmt.Println("  /hand       - Mostrar sua mão atual")
+		fmt.Println("  /ping       - Liga/desliga exibição de RTT")
+		fmt.Println("  /pack       - Abrir pacote de cartas")
+		fmt.Println("  /help       - Mostrar esta ajuda")
+		fmt.Println("  /quit       - Sair do jogo")
+		fmt.Println("  [1-5]       - Atalho para jogar carta")
+		fmt.Println("  <mensagem>  - Enviar chat")
+		fmt.Println()
+
+	case "/quit":
+		sendMessage(encoder, ClientMsg{T: "LEAVE"})
+		fmt.Println("👋 Saindo do jogo...")
+		os.Exit(0)
 
 	default:
-		fmt.Printf("Comando desconhecido: %s. Digite /help para ver os comandos disponíveis.\n", cmd)
+		fmt.Printf("❓ Comando desconhecido: %s. Digite /help para ajuda.\n", cmd)
 	}
 }
 
@@ -148,12 +373,4 @@ func getEnv(k, def string) string {
 		return v
 	}
 	return def
-}
-
-func getPingInterval() time.Duration {
-	intervalStr := getEnv("PING_INTERVAL_MS", "2000")
-	if intervalMs, err := strconv.Atoi(intervalStr); err == nil {
-		return time.Duration(intervalMs) * time.Millisecond
-	}
-	return 2 * time.Second // fallback padrão
 }

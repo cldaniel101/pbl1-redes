@@ -1,6 +1,6 @@
-# Jogo de Cartas Multiplayer
+# Attribute War - Multiplayer
 
-Este repositório contém o desenvolvimento de um jogo de cartas online multiplayer, concebido como o primeiro grande desafio de uma startup fictícia de jogos indie fundada por estudantes de Engenharia de Computação. O projeto foca em duelos táticos e coleção de cartas, com toda a lógica de jogo, estado dos jogadores e comunicação gerenciada por um servidor centralizado.
+Este repositório contém o desenvolvimento de um jogo de cartas online multiplayer. O projeto foca em duelos táticos e coleção de cartas, com toda a lógica de jogo, estado dos jogadores e comunicação gerenciada por um servidor centralizado.
 
 A aplicação cliente-servidor é desenvolvida em Go e a comunicação é realizada via sockets TCP. O ambiente é totalmente containerizado com Docker e Docker Compose para facilitar a execução, o teste e a implantação.
 
@@ -14,11 +14,11 @@ A aplicação cliente-servidor é desenvolvida em Go e a comunicação é realiz
 
 - **Visualização de Atraso**: Sistema implementado de PING/PONG que permite aos jogadores visualizar a latência (RTT - Round-Trip Time) de sua comunicação com o servidor quando solicitado através do comando `/ping`, exibindo valores como `RTT: 3 ms` no console.
 
-- **Sistema de Pacotes de Cartas**: Uma mecânica central para adquirir novas cartas é a abertura de pacotes. O servidor gerencia um "estoque" global e trata requisições concorrentes de forma justa para evitar duplicação ou perda de cartas.
+- **Sistema de Pacotes de Cartas**: Mecânica completa de abertura de pacotes com estoque global thread-safe. O servidor gerencia atomicamente as requisições concorrentes, garantindo justiça na distribuição e auditoria completa de todas as transações. Cada pacote contém 3 cartas únicas sorteadas aleatoriamente.
 
 - **Chat em Tempo Real**: Sistema de comunicação entre jogadores baseado em salas, permitindo coordenação e interação social durante as partidas.
 
-- **Sistema de Comandos**: Interface de comandos no cliente que permite aos jogadores controlar funcionalidades específicas através de comandos que começam com `/`, como `/ping` para controlar a exibição de latência e `/help` para obter ajuda.
+- **Sistema de Comandos**: Interface completa de comandos no cliente incluindo `/ping` para latência, `/pack` para abertura de pacotes, `/play` para jogadas, `/hand` para visualizar cartas, e `/help` para ajuda.
 
 - **Ambiente Containerizado**: Todos os componentes são desenvolvidos e testados em contêineres Docker, permitindo a fácil execução e escalabilidade para testes.
 
@@ -65,21 +65,40 @@ Para interagir com a aplicação, você pode se conectar a uma sessão interativ
 
 5. **Agora você pode**:
    - **Usar comandos**: Digite `/help` para ver todos os comandos disponíveis
-   - **Monitorar a latência**: Use o comando `/ping` para ativar/desativar a exibição das mensagens `RTT: X ms` que mostram a qualidade da conexão com o servidor
-   - **Comunicar entre jogadores**: Digite mensagens que serão transmitidas para outros jogadores na mesma sala
-   - **Testar a conectividade**: Verifique a estabilidade da comunicação cliente-servidor através dos logs detalhados
+   - **Jogar partidas**: Digite qualquer mensagem para entrar na fila de matchmaking e jogar duelos 1v1
+   - **Abrir pacotes**: Use `/pack` para abrir pacotes de cartas (estoque limitado e concorrente)
+   - **Gerenciar cartas**: Use `/hand` para ver sua mão e `/play <número>` para jogar cartas
+   - **Monitorar a latência**: Use `/ping` para ativar/desativar a exibição de RTT
+   - **Testar concorrência**: Execute múltiplos clientes simultaneamente para testar o sistema de pacotes
 
 ### Exemplo de Saída do Cliente:
 ```
-[CLIENT] connected to 172.20.0.2:9000
-Digite mensagens para enviar ou comandos começando com '/':
-Comandos disponíveis: /ping, /help
-Server: Você entrou na fila. Aguardando oponente...
-Received: Partida encontrada! Você está jogando contra 172.20.0.3:45678
-/ping
-Exibição de RTT ativada. Você verá a latência a cada ping.
-RTT: 3 ms
-RTT: 2 ms
+[CLIENT] Conectado ao servidor 172.20.0.2:9000
+Digite mensagens ou comandos (/help para ajuda):
+
+/help
+=== AJUDA ===
+  /play <idx> - Jogar carta pelo índice (1-5)
+  /hand       - Mostrar sua mão atual
+  /ping       - Liga/desliga exibição de RTT
+  /pack       - Abrir pacote de cartas
+  /help       - Mostrar esta ajuda
+  /quit       - Sair do jogo
+
+oi
+🎮 Partida encontrada! Oponente: 172.20.0.3:45678
+
+=== RODADA 1 ===
+💚 Seu HP: 20 | ❤️ HP do Oponente: 20
+🃏 Sua mão (5 cartas):
+  [1] Fire Dragon - FIRE (ATK: 8 / DEF: 5)
+  [2] Ice Mage - WATER (ATK: 6 / DEF: 6)
+  ...
+
+/pack
+📦 Tentando abrir pacote...
+📦 Pacote aberto! Cartas recebidas: [c_003, c_005, c_002]
+📊 Estoque restante: 99 pacotes
 ```
 
 > **Importante**: Para sair da sessão `attach` sem derrubar o contêiner, use a combinação de teclas `Ctrl+P` e em seguida `Ctrl+Q`.
@@ -101,6 +120,53 @@ RTT: 2 ms
   docker compose down -v
   ```
 
+## Testes e Validação
+
+O projeto inclui uma suíte completa de testes para validar a funcionalidade e robustez do sistema:
+
+### Testes de Stress - Sistema de Pacotes
+
+Para testar a concorrência e justiça do sistema de pacotes:
+
+```bash
+cd tests
+go run stress_packs.go
+```
+
+**Resultado esperado:**
+- 20 clientes simultâneos disputando 10 pacotes
+- Exatamente 10 sucessos e 10 falhas (`OUT_OF_STOCK`)
+- Estoque final = 0
+- Nenhuma carta duplicada no mesmo pacote
+- Log de auditoria completo
+
+### Testes Unitários
+
+Execute os testes automatizados com:
+
+```bash
+cd tests
+go test -v
+```
+
+**Testes incluídos:**
+- `TestPackStoreConcurrency`: Validação de concorrência thread-safe
+- `TestPackStoreBasicFunctionality`: Testes de funcionalidade básica
+- `BenchmarkPackStoreConcurrency`: Benchmark de performance
+
+### Exemplo de Resultado dos Testes:
+```
+=== TESTE DE STRESS ===
+✅ Sucessos: 10
+❌ Falhas: 10
+📦 Estoque final: 0
+🎉 TESTE PASSOU: Todos os critérios foram atendidos!
+
+=== TESTES UNITÁRIOS ===
+--- PASS: TestPackStoreConcurrency (0.00s)
+--- PASS: TestPackStoreBasicFunctionality (0.00s)
+```
+
 ## Variáveis de Ambiente
 
 É possível customizar a execução através de variáveis de ambiente no arquivo `docker-compose.yml`.
@@ -111,43 +177,63 @@ RTT: 2 ms
 
 ## Arquitetura da Aplicação
 
+### Estrutura do Projeto:
+```
+├── server/
+│   ├── main.go              # Servidor principal com handlers
+│   ├── cards.json           # Base de dados de cartas
+│   ├── packs/
+│   │   └── packs.go         # Sistema de pacotes thread-safe
+│   ├── game/
+│   │   ├── cards.go         # Lógica de cartas e sistema de pacotes
+│   │   ├── match.go         # Lógica de partidas e duelos
+│   │   └── types.go         # Tipos e constantes do jogo
+│   └── protocol/
+│       └── protocol.go      # Protocolo de comunicação JSONL
+├── client/
+│   └── main.go              # Cliente com interface de comandos
+├── tests/
+│   ├── stress_packs.go      # Teste de stress do sistema de pacotes
+│   └── packs_test.go        # Testes unitários e benchmarks
+└── docker-compose.yml       # Orquestração dos contêineres
+```
+
 ### Fluxo de Comunicação:
 
-1. **Inicialização**: Cliente conecta ao servidor e entra automaticamente na sala de jogo
-2. **Monitoramento de Latência**: Cliente envia PING com timestamp → Servidor responde PONG → Cliente calcula e exibe RTT
-3. **Comunicação**: Mensagens e comandos de jogo são transmitidos em tempo real via sockets TCP
-4. **Gestão de Estado**: Servidor mantém o estado centralizado de todos os jogadores e partidas
+1. **Inicialização**: Cliente conecta ao servidor via TCP e entra na fila de matchmaking
+2. **Matchmaking**: Servidor pareia jogadores em duelos 1v1 automáticos
+3. **Duelos**: Sistema de turnos simultâneos com cartas, elementos e cálculo de dano
+4. **Pacotes**: Sistema de abertura de pacotes com estoque global e controle de concorrência
+5. **Monitoramento**: Sistema PING/PONG para medição de latência em tempo real
 
-### Protocolo de Mensagens:
+### Protocolo de Mensagens (JSONL):
 
-- `CMD FIND_MATCH`: Cliente entra na fila de matchmaking para encontrar partida
-- `PING <timestamp>`: Solicitação de latência com timestamp para monitoramento de qualidade da conexão
-- `PONG <timestamp>`: Resposta de latência ecoando o timestamp original
-- `MSG <texto>`: Mensagem de comunicação entre jogadores
-- `ACK <texto>`: Confirmação de comando executado pelo servidor
+**Cliente → Servidor:**
+- `{"t": "FIND_MATCH"}`: Entra na fila de matchmaking
+- `{"t": "PLAY", "cardId": "c_001"}`: Joga uma carta específica
+- `{"t": "OPEN_PACK"}`: Solicita abertura de pacote
+- `{"t": "PING", "ts": 1234567890}`: Ping para medição de latência
+- `{"t": "CHAT", "text": "mensagem"}`: Mensagem de chat
+- `{"t": "LEAVE"}`: Sair da partida/desconectar
+
+**Servidor → Cliente:**
+- `{"t": "MATCH_FOUND", "matchId": "m_001", "opponentId": "p_b"}`: Partida encontrada
+- `{"t": "STATE", "you": {...}, "opponent": {...}, "round": 1}`: Estado da partida
+- `{"t": "ROUND_RESULT", "you": {...}, "opponent": {...}}`: Resultado da rodada
+- `{"t": "PACK_OPENED", "cards": ["c_1", "c_2"], "stock": 99}`: Pacote aberto
+- `{"t": "ERROR", "code": "OUT_OF_STOCK", "msg": "..."}`: Mensagem de erro
+- `{"t": "PONG", "ts": 1234567890, "rttMs": 42}`: Resposta de ping
 
 ### Comandos do Cliente:
 
+- `/help`: Mostra a lista completa de comandos disponíveis
+- `/play <índice>`: Joga uma carta pelo índice (1-5) durante uma partida
+- `/hand`: Exibe as cartas na mão atual do jogador
+- `/pack`: Abre um pacote de cartas (consome do estoque global)
 - `/ping`: Liga/desliga a exibição de RTT (latência) no console
-- `/help`: Mostra a lista de comandos disponíveis
+- `/quit`: Sai do jogo e desconecta do servidor
 
-## Status do Desenvolvimento
-
-**Fase Atual: Infraestrutura Base** ✅
-- [x] Comunicação cliente-servidor via sockets TCP
-- [x] Sistema de monitoramento de latência (PING/PONG RTT)
-- [x] Chat em tempo real entre jogadores
-- [x] Containerização completa com Docker
-- [x] Sistema de matchmaking 1v1 básico
-- [x] Sistema de comandos no cliente (/ping, /help)
-
-**Próximas Fases:**
-- [ ] Implementação da lógica de duelos 1v1
-- [ ] Sistema de cartas e baralhos
-- [ ] Mecânica de pacotes de cartas
-- [ ] Interface de jogo mais elaborada
-- [ ] Sistema de ranking e progressão
 
 ---
 
-*Este projeto representa a implementação de uma infraestrutura robusta para jogos online multiplayer, demonstrando conceitos fundamentais de programação de redes, sistemas distribuídos e desenvolvimento de jogos.*
+*Este projeto representa a implementação completa de um jogo de cartas multiplayer, demonstrando conceitos avançados de programação de redes, sistemas distribuídos, concorrência thread-safe e desenvolvimento de jogos. Inclui mecânicas complexas como sistema de elementos, duelos táticos, estoque global concorrente e uma suíte completa de testes automatizados.*
