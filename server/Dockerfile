@@ -10,6 +10,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /server
 FROM alpine:latest
 RUN apk --no-cache add netcat-openbsd
 COPY --from=build /server /server
+COPY server/cards.json /cards.json
 USER 65532:65532
 EXPOSE 9000
 ENTRYPOINT ["/server"]

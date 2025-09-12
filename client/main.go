@@ -37,6 +37,9 @@ type ServerMsg struct {
 	RTTMs      int64       `json:"rttMs,omitempty"`
 	Result     string      `json:"result,omitempty"`
 	Logs       []string    `json:"logs,omitempty"`
+	// Campos para chat
+	SenderID string `json:"senderId,omitempty"`
+	Text     string `json:"text,omitempty"`
 }
 
 type PlayerView struct {
@@ -304,6 +307,9 @@ func handleServerMessage(msg *ServerMsg) {
 			fmt.Printf("🏓 RTT: %d ms\n", msg.RTTMs)
 		}
 		pingMutex.RUnlock()
+
+	case "CHAT_MESSAGE":
+		fmt.Printf("💬 %s: %s\n", msg.SenderID, msg.Text)
 	}
 }
 

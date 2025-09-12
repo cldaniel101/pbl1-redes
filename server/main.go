@@ -312,7 +312,12 @@ func (gs *GameServer) handleChat(player *protocol.PlayerConn, text string) {
 	}
 
 	if opponent != nil {
-		// Envia mensagem para o oponente (implementação básica)
+		// Envia mensagem de chat para o oponente
+		opponent.SendMsg(protocol.ServerMsg{
+			T:        protocol.CHAT_MESSAGE,
+			SenderID: player.ID,
+			Text:     text,
+		})
 		log.Printf("[SERVER] Chat de %s para %s: %s", player.ID, opponent.ID, text)
 	}
 }

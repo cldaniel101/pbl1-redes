@@ -32,6 +32,9 @@ type ServerMsg struct {
 	RTTMs      int64       `json:"rttMs,omitempty"`
 	Result     string      `json:"result,omitempty"`
 	Logs       []string    `json:"logs,omitempty"`
+	// Campos para chat
+	SenderID string `json:"senderId,omitempty"`
+	Text     string `json:"text,omitempty"`
 }
 
 // PlayerView representa a visão de um jogador no estado da partida
@@ -63,6 +66,7 @@ const (
 	ERROR        = "ERROR"
 	PONG         = "PONG"
 	MATCH_END    = "MATCH_END"
+	CHAT_MESSAGE = "CHAT_MESSAGE"
 )
 
 // Códigos de erro
